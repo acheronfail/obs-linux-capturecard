@@ -18,3 +18,7 @@ test: build
 # Opt-in hardware test; close other sources using this video device first.
 smoke device:
     ./scripts/smoke.sh {{quote(device)}}
+
+# Read-only USB, kernel, and OBS diagnostics; safe while capturing.
+diagnose device:
+    python3 ./scripts/diagnose.py {{quote(device)}}

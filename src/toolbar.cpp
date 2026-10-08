@@ -85,8 +85,11 @@ public:
     calldata_init(&call);
     const bool ok = proc_handler_call(obs_source_get_proc_handler(source),
                                       "get_capture_state", &call);
-    button->setText(calldata_bool(&call, "active") ? "Deactivate" : "Activate");
-    button->setEnabled(ok && !calldata_bool(&call, "pending"));
+    const bool active = calldata_bool(&call, "active");
+    const bool pending = calldata_bool(&call, "pending");
+    button->setText(pending ? (active ? "Starting…" : "Stopping…")
+                            : (active ? "Deactivate" : "Activate"));
+    button->setEnabled(ok && !pending);
     calldata_free(&call);
     obs_source_release(source);
   }

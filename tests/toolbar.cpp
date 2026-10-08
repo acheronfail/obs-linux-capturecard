@@ -11,11 +11,15 @@
 
 struct State {
   bool active = true;
+  bool pending = false;
 };
 static const char *name(void *) { return "Test"; }
 static void get_state(void *data, calldata_t *call) {
   calldata_set_bool(call, "active", static_cast<State *>(data)->active);
-  calldata_set_bool(call, "pending", false);
+  calldata_set_bool(call, "pending", static_cast<State *>(data)->pending);
+}
+static void set_pending(void *data, calldata_t *call) {
+  static_cast<State *>(data)->pending = calldata_bool(call, "pending");
 }
 static void toggle(void *data, calldata_t *) {
   auto *state = static_cast<State *>(data);
@@ -28,6 +32,8 @@ static void *create(obs_data_t *, obs_source_t *source) {
                    get_state, state);
   proc_handler_add(obs_source_get_proc_handler(source), "void toggle_capture()",
                    toggle, state);
+  proc_handler_add(obs_source_get_proc_handler(source),
+                   "void set_pending(in bool pending)", set_pending, state);
   return state;
 }
 static void destroy(void *data) { delete static_cast<State *>(data); }
@@ -100,6 +106,23 @@ int main(int argc, char **argv) {
   QThread::msleep(250);
   app.processEvents();
   assert(button->text() == "Activate");
+  calldata_init(&call);
+  calldata_set_bool(&call, "pending", true);
+  proc_handler_call(obs_source_get_proc_handler(second), "set_pending", &call);
+  QThread::msleep(250);
+  app.processEvents();
+  assert(!button->isEnabled() && button->text() == "Stopping…");
+  proc_handler_call(obs_source_get_proc_handler(second), "toggle_capture",
+                    &call);
+  QThread::msleep(250);
+  app.processEvents();
+  assert(!button->isEnabled() && button->text() == "Starting…");
+  calldata_set_bool(&call, "pending", false);
+  proc_handler_call(obs_source_get_proc_handler(second), "set_pending", &call);
+  QThread::msleep(250);
+  app.processEvents();
+  assert(button->isEnabled() && button->text() == "Deactivate");
+  calldata_free(&call);
   view->setCurrentIndex(model.index(2, 0));
   assert(button->isHidden());
   button->click();

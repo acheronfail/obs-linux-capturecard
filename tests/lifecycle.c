@@ -5,7 +5,9 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <util/platform.h>
 
 static atomic_int video_live, audio_live, video_opens, audio_opens, forwarded;
@@ -20,11 +22,8 @@ static const char *name(void *unused) {
 static void *video_create(obs_data_t *settings, obs_source_t *source) {
   /* A restart must never open a second capture before the first closes. */
   assert(atomic_fetch_add(&video_live, 1) == 0);
-  assert(
-      strcmp(
-          obs_data_get_string(settings, "device_id"),
-          "/dev/v4l/by-id/usb-MACROSILICON_UGREEN_25773_TEST-video-index0") ==
-      0);
+  assert(strcmp(strrchr(obs_data_get_string(settings, "device_id"), '/') + 1,
+                "usb-MACROSILICON_UGREEN_25773_TEST-video-index0") == 0);
   assert(obs_data_get_int(settings, "resolution") ==
          ((INT64_C(1920) << 32) | 1080));
   assert(obs_data_get_int(settings, "framerate") == ((INT64_C(1) << 32) | 60));
@@ -129,6 +128,33 @@ static void click(obs_source_t *source, const char *button) {
   obs_properties_destroy(props);
 }
 
+static void check_health(obs_source_t *source) {
+  calldata_t call;
+  calldata_init(&call);
+  assert(proc_handler_call(obs_source_get_proc_handler(source),
+                           "check_capture_health", &call));
+  calldata_free(&call);
+}
+
+static void wait_video(obs_source_t *source, bool video) {
+  check_health(source);
+  for (int i = 0; i < 1000; i++) {
+    calldata_t call;
+    calldata_init(&call);
+    assert(proc_handler_call(obs_source_get_proc_handler(source),
+                             "get_capture_state", &call));
+    bool ready = !calldata_bool(&call, "pending") &&
+                 !calldata_bool(&call, "checking_health") &&
+                 calldata_bool(&call, "video") == video;
+    assert(calldata_bool(&call, "active"));
+    calldata_free(&call);
+    if (ready)
+      return;
+    os_sleep_ms(5);
+  }
+  assert(!"USB recovery timed out");
+}
+
 static void barrier(void *unused) { (void)unused; }
 
 int main(int argc, char **argv) {
@@ -140,7 +166,7 @@ int main(int argc, char **argv) {
   struct obs_source_info video = {
       .id = "v4l2_input",
       .type = OBS_SOURCE_TYPE_INPUT,
-      .output_flags = OBS_SOURCE_VIDEO,
+      .output_flags = OBS_SOURCE_ASYNC_VIDEO,
       .get_name = name,
       .create = video_create,
       .destroy = video_destroy,
@@ -184,6 +210,12 @@ int main(int argc, char **argv) {
   obs_properties_destroy(device_props);
   assert(obs_source_get_width(source) == 1280);
   assert(obs_source_get_height(source) == 720);
+  calldata_t health;
+  calldata_init(&health);
+  assert(proc_handler_call(obs_source_get_proc_handler(source),
+                           "get_capture_state", &health));
+  assert(!calldata_bool(&health, "video_frames"));
+  calldata_free(&health);
   obs_source_add_audio_capture_callback(source, received, NULL);
   float left[480], right[480];
   for (int i = 0; i < 480; i++) {
@@ -262,9 +294,54 @@ int main(int argc, char **argv) {
   obs_queue_task(OBS_TASK_DESTROY, barrier, NULL, true);
   obs_queue_task(OBS_TASK_DESTROY, barrier, NULL, true);
   assert(video_live == 0 && audio_live == 0);
+  /* Re-enumeration may reuse a node number. Reopen by stable identity,
+   * and never reopen a source the user explicitly deactivated. */
+  char directory[] = "/tmp/capture-card-test-XXXXXX";
+  assert(mkdtemp(directory));
+  char device[512], first_node[512], second_node[512];
+  snprintf(device, sizeof(device),
+           "%s/usb-MACROSILICON_UGREEN_25773_TEST-video-index0", directory);
+  snprintf(first_node, sizeof(first_node), "%s/video0", directory);
+  snprintf(second_node, sizeof(second_node), "%s/video1", directory);
+  FILE *node = fopen(first_node, "w");
+  assert(node && fclose(node) == 0);
+  node = fopen(second_node, "w");
+  assert(node && fclose(node) == 0);
+  assert(symlink(first_node, device) == 0);
+  obs_data_set_string(settings, "video_device", device);
+  source =
+      obs_source_create("linux_capture_card", "Recovering USB", settings, NULL);
+  wait_ready(source, true);
+  opened = video_opens;
+  assert(unlink(device) == 0);
+  wait_video(source, false);
+  assert(video_live == 0 && audio_live == 0);
+  assert(video_opens == opened);
+  assert(symlink(second_node, device) == 0);
+  wait_video(source, true);
+  assert(video_opens == opened + 1);
+  assert(audio_live == 1 && video_live == 1);
+  /* Observe replacement even when the missing-device poll was skipped. */
+  opened = video_opens;
+  assert(unlink(device) == 0 && symlink(first_node, device) == 0);
+  wait_video(source, true);
+  assert(video_opens == opened + 1);
+  click(source, "toggle");
+  wait_ready(source, false);
+  opened = video_opens;
+  assert(unlink(device) == 0 && symlink(first_node, device) == 0);
+  check_health(source);
+  wait_ready(source, false);
+  assert(video_opens == opened);
+  obs_source_release(source);
+  obs_queue_task(OBS_TASK_DESTROY, barrier, NULL, true);
+  assert(unlink(device) == 0);
+  assert(unlink(first_node) == 0 && unlink(second_node) == 0);
+  assert(rmdir(directory) == 0);
   obs_data_release(settings);
   obs_shutdown();
   puts("PASS: module load, USB audio matching, sample forwarding, "
-       "deactivate/activate, restart ordering, burst requests, cleanup");
+       "deactivate/activate, restart ordering, burst requests, cleanup, "
+       "USB disconnect/replacement recovery");
   return 0;
 }

@@ -99,6 +99,11 @@ int main(int argc, char **argv) {
   if (ok) {
     printf("PASS: video frames (%ux%u) and audio samples received\n",
            obs_source_get_width(source), obs_source_get_height(source));
+    /* Cross both watchdog thresholds before exercising manual restarts. */
+    os_sleep_ms(12000);
+    ok = wait_state(source, true);
+    if (ok)
+      puts("PASS: continuous fresh-frame health across watchdog thresholds");
     for (int i = 0; i < 3 && ok; i++) {
       click(source, "toggle");
       ok = wait_state(source, false);
